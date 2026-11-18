@@ -69,24 +69,28 @@ app.use((err, req, res, next) => {
   console.error(err);
   res.status(500).render('error', { title: 'Something went wrong', message: err.message });
 });
-
-// Updates data saved by the older version (with Rooms & Beds) so it still works
 async function upgradeOldData() {
   const db = mongoose.connection.db;
   await db.collection('patients').updateMany({ status: { $in: ['Pending Bed', 'Transferred'] } }, { $set: { status: 'Admitted' } });
   await db.collection('admissions').updateMany({ status: { $in: ['Pending Bed', 'Transferred'] } }, { $set: { status: 'Admitted' } });
   await db.collection('admissions').updateMany({ bed: { $exists: true } }, { $unset: { bed: '', bedLabel: '' } });
   // Give existing users the new "Assess patients" privilege based on their role
-  for (const u of await User.find({ 'permissions.assessPatients': { $exists: false } })) {
-    u.permissions.assessPatients = !!(User.ROLE_DEFAULTS[u.role] || {}).assessPatients;
-    await u.save();
+  // (updateOne skips validation, so records made by other systems cannot stop the server)
+  const users = await db.collection('users').find({ role: { $in: User.ROLES }, 'permissions.assessPatients': { $exists: false } }).toArray();
+  for (const u of users) {
+    await db.collection('users').updateOne({ _id: u._id },
+      { $set: { 'permissions.assessPatients': !!(User.ROLE_DEFAULTS[u.role] || {}).assessPatients } });
   }
 }
 
 mongoose.connect(MONGODB_URI)
   .then(async () => {
     console.log('Connected to MongoDB');
-    await upgradeOldData();
+    try {
+      await upgradeOldData();
+    } catch (err) {
+      console.warn('Warning: could not update old records:', err.message);
+    }
     app.listen(PORT, () => console.log(`MediAdmit is running at http://localhost:${PORT}`));
   })
   .catch((err) => {
